@@ -2,148 +2,153 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
+import datetime
+from dateutil.relativedelta import relativedelta
 
-# 1. CONFIGURAÇÃO DE PÁGINA
+# 1. CONFIGURAÇÃO DA PÁGINA
 st.set_page_config(page_title="Offshore Portfolio Analytics", layout="wide")
 
 st.markdown("""
     <style>
     [data-testid="stDataFrame"] { width: 100%; }
-    th { min-width: 110px !important; text-align: center !important; white-space: pre-wrap !important; }
-    h1, h2, h3 { color: #0E1F40; font-family: 'Segoe UI', sans-serif; }
-    .metric-container { 
-        background-color: #F0F2F6; 
-        padding: 15px; 
-        border-radius: 10px; 
-        border-left: 5px solid #0E1F40;
-        margin-top: 20px;
-    }
+    h1, h2, h3 { color: #1C2C54; font-family: 'Segoe UI', sans-serif; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; background-color: #f0f2f6; border-radius: 4px; padding: 10px; }
+    .stTabs [aria-selected="true"] { background-color: #1C2C54 !important; color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# Cores adaptadas para um visual institucional offshore
-CORES_OFFSHORE = ['#A3B1C6', '#6D7D92', '#4A5568', '#2D3748', '#1A202C']
-COR_BENCH = '#CBD5E0'
-
-st.title("🌎 Offshore Asset Allocation | Manager View")
-
-st.sidebar.header("International Settings")
-arquivo = st.sidebar.file_uploader("Upload Excel Base 100", type=['xlsx'])
-
-def calculate_max_drawdown(return_series):
-    comp_ret = (1 + return_series).cumprod()
-    peak = comp_ret.cummax()
-    drawdown = (comp_ret - peak) / peak
-    return drawdown.min()
-
-if arquivo:
+# 2. FUNÇÃO DE CARREGAMENTO (CORRIGIDA PARA EVITAR O ERRO DE 'INT')
+@st.cache_data
+def load_offshore_data(file):
     try:
-        # Carregamento (Header duplo conforme padrão do código original)
-        df_base100 = pd.read_excel(arquivo, header=[0, 1], index_col=0, parse_dates=True)
+        # Lemos o Excel
+        df = pd.read_excel(file)
         
-        # Filtro de data
-        start, end = st.sidebar.slider("Analysis Period:", 
-                                     df_base100.index.min().to_pydatetime(), 
-                                     df_base100.index.max().to_pydatetime(), 
-                                     (df_base100.index.min().to_pydatetime(), df_base100.index.max().to_pydatetime()))
+        # SOLUÇÃO DO ERRO: Convertemos o nome da coluna para string ANTES de tratar o texto
+        new_columns = []
+        for c in df.columns:
+            column_name = str(c) # Garante que vira texto (resolve o erro do 'int')
+            column_name = column_name.replace('\n', ' ').replace('"', '').strip()
+            new_columns.append(column_name)
         
-        df_f = df_base100.loc[start:end].copy()
-        # Conversão de Base 100 para Retornos Diários
-        ret_diarios = df_f.pct_change().dropna()
-        num_dias = len(ret_diarios)
-
-        # --- LÓGICA DE BENCHMARKS OFFSHORE ---
-        # Identificação das colunas para os benchmarks compostos
-        msci_col = next((col for col in df_f.columns if "MSCI WORLD" in col[1].upper()), None)
-        bbg_col = next((col for col in df_f.columns if "BLOOMBERG US" in col[1].upper() or "GLOBAL AGG" in col[1].upper()), None)
-        cpi_col = next((col for col in df_f.columns if "CPI" in col[1].upper()), None)
-
-        # --- BLOCO 1: DEFINIÇÃO DE PESOS ---
-        st.subheader("🏗️ Portfolio Construction")
-        perfis = ["Ultra Conservador", "Conservador", "Moderado", "Arrojado", "Agressivo"]
+        df.columns = new_columns
         
-        # Estrutura baseada nas classes da imagem fornecida
-        df_pesos = pd.DataFrame({"Classe": [c[0] for c in df_f.columns], "Ativo": [c[1] for c in df_f.columns]})
-        for p in perfis: df_pesos[p] = 0.0
+        # Converte a coluna Date
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            df = df.dropna(subset=['Date']).sort_values('Date').set_index('Date')
         
-        edited = st.data_editor(df_pesos, hide_index=True, use_container_width=True)
-
-        # --- CÁLCULOS DE PERFORMANCE E RISCO ---
-        metrics, risk_decomp, perf_acum = {}, {}, pd.DataFrame(index=ret_diarios.index)
-        cov_matrix = ret_diarios.cov() * 252
-
-        for p in perfis:
-            w = np.array(edited[p]) / 100
-            ret_p = ret_diarios.dot(w)
-            
-            # Métricas Anualizadas
-            r_anual = (1 + (1 + ret_p).prod() - 1)**(252/num_dias) - 1 if num_dias > 0 else 0
-            vol_p = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
-            max_dd = calculate_max_drawdown(ret_p)
-            
-            metrics[p] = {
-                "Retorno Anual": r_anual, 
-                "Volatilidade": vol_p, 
-                "Max Drawdown": max_dd
-            }
-            perf_acum[p] = (1 + ret_p).cumprod() - 1
-            
-            # Decomposição de Risco
-            if vol_p > 0:
-                risk_decomp[p] = pd.Series((w * np.dot(cov_matrix, w)) / vol_p**2, index=[c[0] for c in df_f.columns]).groupby(level=0).sum()
-
-        # --- RESULTADOS ---
-        st.markdown("---")
-        res_df = pd.DataFrame(metrics)
-        st.write("📊 **Consolidated Risk & Return (USD)**")
-        st.dataframe(res_df.style.format("{:.2%}"), use_container_width=True)
-
-        # --- GRÁFICO DE PERFORMANCE ---
-        st.subheader("📈 Cumulative Performance")
-        fig_comp = go.Figure()
-
-        # Adicionar Benchmarks Dinâmicos conforme sua regra
-        if msci_col and bbg_col:
-            bench_data = {
-                "Ultra Conservador": ret_diarios[bbg_col],
-                "Conservador": (ret_diarios[msci_col] * 0.10) + (ret_diarios[bbg_col] * 0.90),
-                "Moderado": (ret_diarios[msci_col] * 0.20) + (ret_diarios[bbg_col] * 0.80)
-            }
-            
-            # Exibir no gráfico o benchmark do perfil selecionado ou o Moderado por padrão
-            bench_moderado = (1 + bench_data["Moderado"]).cumprod() - 1
-            fig_comp.add_trace(go.Scatter(x=bench_moderado.index, y=bench_moderado, 
-                                        name="Benchmark (20/80)", line=dict(color=COR_BENCH, dash='dot')))
-
-        for i, p in enumerate(perfis):
-            fig_comp.add_trace(go.Scatter(x=perf_acum.index, y=perf_acum[p], name=p, 
-                                        line=dict(color=CORES_OFFSHORE[i], width=2.5)))
-
-        fig_comp.update_layout(template="simple_white", yaxis_tickformat='.1%', height=500, hovermode="x unified")
-        st.plotly_chart(fig_comp, use_container_width=True)
-
-        # --- ANÁLISE DE RISCO (BARRA DE CLASSES) ---
-        st.markdown("---")
-        col_risk, col_dd = st.columns(2)
-        
-        with col_risk:
-            st.subheader("🏢 Allocation by Asset Class")
-            df_c = edited.groupby("Classe")[perfis].sum().T
-            fig_bar = go.Figure()
-            for c in df_c.columns:
-                fig_bar.add_trace(go.Bar(name=c, x=perfis, y=df_c[c]/100))
-            fig_bar.update_layout(barmode='stack', template="simple_white", yaxis_tickformat='.0%', height=400)
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-        with col_dd:
-            st.subheader("⚠️ Risk Contribution")
-            df_rd = pd.DataFrame(risk_decomp).fillna(0)
-            st.dataframe(df_rd.style.format("{:.1%}").background_gradient(cmap='YlOrRd'), use_container_width=True, height=400)
-
+        # Garante que os valores das células são números
+        df = df.apply(pd.to_numeric, errors='coerce').ffill()
+        return df
     except Exception as e:
-        st.error(f"Erro no processamento dos dados offshore: {e}")
-        st.info("Certifique-se que o Excel possui as colunas da imagem: Treasury, Bloomberg US Corporate, S&P, etc.")
+        st.error(f"Erro ao processar o ficheiro: {e}")
+        return None
+
+# --- SIDEBAR: TIMEFRAME ---
+with st.sidebar:
+    st.title("📂 Configurações")
+    uploaded_file = st.file_uploader("Upload 'database.xlsx'", type=["xlsx", "xls"])
+    
+    st.divider()
+    
+    start_date = None
+    end_date = None
+
+    if uploaded_file:
+        st.subheader("🗓️ Timeframe")
+        df_temp = load_offshore_data(uploaded_file)
+        
+        if df_temp is not None and not df_temp.empty:
+            min_db = df_temp.index.min().to_pydatetime()
+            max_db = df_temp.index.max().to_pydatetime()
+            
+            opcoes = ["Máximo", "YTD", "12 Meses", "24 Meses", "Personalizado"]
+            selecao = st.radio("Selecione o período:", opcoes, index=2)
+
+            if selecao == "Máximo":
+                start_date, end_date = min_db, max_db
+            elif selecao == "YTD":
+                start_date = datetime.datetime(max_db.year, 1, 1)
+                end_date = max_db
+            elif selecao == "12 Meses":
+                start_date = max_db - relativedelta(months=12)
+                end_date = max_db
+            elif selecao == "24 Meses":
+                start_date = max_db - relativedelta(months=24)
+                end_date = max_db
+            elif selecao == "Personalizado":
+                periodo = st.date_input("Intervalo:", value=(min_db, max_db), min_value=min_db, max_value=max_db)
+                if isinstance(periodo, tuple) and len(periodo) == 2:
+                    start_date, end_date = periodo
+
+            if start_date and start_date < min_db: start_date = min_db
+            if start_date and end_date:
+                st.success(f"Período: {start_date.strftime('%d/%m/%Y')} - {end_date.strftime('%d/%m/%Y')}")
+
+# --- ÁREA PRINCIPAL ---
+if uploaded_file and start_date and end_date:
+    df_raw = load_offshore_data(uploaded_file)
+    
+    if df_raw is not None:
+        mask = (df_raw.index >= pd.Timestamp(start_date)) & (df_raw.index <= pd.Timestamp(end_date))
+        df_filtered = df_raw.loc[mask]
+
+        if not df_filtered.empty:
+            st.title("📊 Offshore Performance Analytics")
+            
+            # Matriz de Perfis
+            perfis_df = pd.DataFrame({
+                "Classe": ['Cash', 'High Yield', 'Investment Grade', 'Treasury 10y', 'Equity', 'Alternatives'],
+                "Ultra Conservador": [90, 0, 10, 0, 0, 0],
+                "Conservador": [60, 0, 30, 10, 0, 0],
+                "Moderado": [20, 10, 30, 10, 20, 10],
+                "Arrojado": [5, 15, 15, 5, 45, 15],
+                "Agressivo": [0, 15, 5, 0, 60, 20]
+            })
+            
+            edited_df = st.data_editor(perfis_df, hide_index=True, use_container_width=True)
+            perfil_ativo = st.select_slider("Perfil Visualizado:", options=["Ultra Conservador", "Conservador", "Moderado", "Arrojado", "Agressivo"], value="Moderado")
+
+            # Cálculos
+            returns = df_filtered.pct_change().dropna()
+            weights = edited_df.set_index("Classe")[perfil_ativo] / 100
+            
+            # Retorno do Usuário
+            user_ret = sum(returns[asset] * weights[asset] for asset in weights.index if asset in returns.columns)
+            
+            # KPIs
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Retorno Total", f"{(1 + user_ret).prod() - 1:.2%}")
+            with c2:
+                st.metric("Volatilidade (aa)", f"{user_ret.std() * np.sqrt(12):.2%}")
+            with c3:
+                if 'CPI' in returns.columns:
+                    st.metric("CPI", f"{(1 + returns['CPI']).prod() - 1:.2%}")
+
+            # Gráficos
+            tab1, tab2 = st.tabs(["📈 Evolução", "🧱 Alocação"])
+            with tab1:
+                fig = go.Figure()
+                cum_ret = (1 + user_ret).cumprod() * 100
+                fig.add_trace(go.Scatter(x=cum_ret.index, y=cum_ret, name="Sua Carteira", line=dict(color='#1C2C54', width=3)))
+                if 'Bloomberg Global Aggregate' in returns.columns:
+                    bench = (1 + returns['Bloomberg Global Aggregate']).cumprod() * 100
+                    fig.add_trace(go.Scatter(x=bench.index, y=bench, name="Benchmark Agg", line=dict(dash='dot')))
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with tab2:
+                # Composição de área
+                comp_df = pd.DataFrame(index=df_filtered.index)
+                for asset, w in weights.items():
+                    if w > 0 and asset in df_filtered.columns:
+                        comp_df[asset] = w * (df_filtered[asset] / df_filtered[asset].iloc[0]) * 100
+                fig_area = go.Figure()
+                for col in comp_df.columns:
+                    fig_area.add_trace(go.Scatter(x=comp_df.index, y=comp_df[col], name=col, stackgroup='one', mode='none'))
+                st.plotly_chart(fig_area, use_container_width=True)
 
 else:
-    st.info("Aguardando upload do arquivo Excel com dados em base 100.")
+    st.info("Aguardando ficheiro Excel...")
